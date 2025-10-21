@@ -1,3 +1,4 @@
+numpy==1.24.4
 dkpro_cassis==0.9.1
 fastapi==0.104.1
 pydantic==2.4.2
@@ -5,4 +6,7 @@ pydantic-settings==2.0.3
 pydantic_core==2.10.1
 starlette==0.27.0
 uvicorn==0.23.2
-whisperx==3.7.4
+transformers==4.48.2
+packaging==24.2
+ninja==1.11.1.3
+einops==0.8.0

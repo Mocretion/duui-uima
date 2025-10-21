@@ -7,6 +7,7 @@ from tempfile import NamedTemporaryFile
 from threading import Lock
 from time import time
 from typing import List, Optional
+import requests
 
 import torch
 import whisperx
@@ -60,8 +61,8 @@ class DocumentModification(BaseModel):
 # Request sent by DUUI
 # Note, this is transformed by the Lua script
 class DUUIRequest(BaseModel):
-    # audio in base64
-    audio: str
+    # video url
+    ids: List[str]
     language: str
     model: str = "large-v2"
     batch_size: int = 16
@@ -270,59 +271,67 @@ def post_process(request: DUUIRequest) -> DUUIResponse:
         language = request.language
     logger.info("Language: %s", language)
 
-    with NamedTemporaryFile() as audio_file:
-        # if this fails we stop processing
-        with open(audio_file.name, "wb") as fp:
-            fp.write(base64.b64decode(request.audio))
+    for video_id in request.ids:
+        
+        download_url =  "https://cldf-od.r53.cdn.tv1.eu/1000153copo/ondemand/app144277506/145293313/" + video_id + "/" + video_id + "_h264_512_288_514kb_baseline_de_514.mp4"
+        
+        with NamedTemporaryFile() as audio_file:
+                
+            response = requests.get(download_url, stream=True)
+            response.raise_for_status()  # check for errors
 
-        model = load_model(request.model, language, not request.allow_download)
-        audio = whisperx.load_audio(audio_file.name)
-        # TODO language param
-        result = model.transcribe(audio, batch_size=request.batch_size)
+            with open(audio_file, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
 
-        # use language detected by the model if not provided
-        if not language:
-            language = result["language"]
-            logger.info("Using detected language: %s", language)
+            model = load_model(request.model, language, not request.allow_download)
+            audio = whisperx.load_audio(audio_file.name)
+            result = model.transcribe(audio, batch_size=request.batch_size)
 
-        alignment_model, metadata = load_align_model(language)
-        aligned_result = whisperx.align(result["segments"], alignment_model, metadata, audio_file.name, device)
+            # use language detected by the model if not provided
+            if not language:
+                language = result["language"]
+                logger.info("Using detected language: %s", language)
 
-        current_length = 0
-        for word in aligned_result["word_segments"]:
-            audio_start = word.get("start")
-            audio_end = word.get("end")
-            text = word.get("word").strip()
+            alignment_model, metadata = load_align_model(language)
+            aligned_result = whisperx.align(result["segments"], alignment_model, metadata, audio_file.name, device)
 
-            if audio_start is None or audio_end is None:  # If segment is not spoken out loud, such as '-'
-                continue
+            current_length = 0
+            for word in aligned_result["word_segments"]:
+                audio_start = word.get("start")
+                audio_end = word.get("end")
+                text = word.get("word").strip()
 
-            if len(text) == 0 and audio_start == audio_end:  # If segment contains no information
-                continue
+                if audio_start is None or audio_end is None:  # If segment is not spoken out loud, such as '-'
+                    continue
 
-            results.append(AudioToken(
-                timeStart=float(audio_start),
-                timeEnd=float(audio_end),
-                text=text,
-                begin=current_length,
-                end=current_length + len(text)
-            ))
+                if len(text) == 0 and audio_start == audio_end:  # If segment contains no information
+                    continue
 
-            if len(text) > 0:
-                current_length += len(text) + 1
+                results.append(AudioToken(
+                    timeStart=float(audio_start),
+                    timeEnd=float(audio_end),
+                    text=text,
+                    begin=current_length,
+                    end=current_length + len(text)
+                ))
 
-        meta = AnnotationMeta(
-            name=settings.annotator_name,
-            version=settings.annotator_version,
-            modelName=f"whisperX {request.model}",
-            modelVersion=whisperx_version
-        )
+                if len(text) > 0:
+                    current_length += len(text) + 1
 
-        modification_meta = DocumentModification(
-            user=settings.annotator_name,
-            timestamp=modification_timestamp_seconds,
-            comment=f"{settings.annotator_name} ({settings.annotator_version}), whisperX ({whisperx_version})"
-        )
+            meta = AnnotationMeta(
+                name=settings.annotator_name,
+                version=settings.annotator_version,
+                modelName=f"whisperX {request.model}",
+                modelVersion=whisperx_version
+            )
+
+            modification_meta = DocumentModification(
+                user=settings.annotator_name,
+                timestamp=modification_timestamp_seconds,
+                comment=f"{settings.annotator_name} ({settings.annotator_version}), whisperX ({whisperx_version})"
+            )
 
     logger.debug(meta)
     logger.debug(modification_meta)

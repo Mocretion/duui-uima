@@ -9,7 +9,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteract
 RUN pip install torch==2.0.0 torchvision==0.15.1 torchaudio==2.0.1 --index-url https://download.pytorch.org/whl/cpu
 
 COPY ./requirements.txt ./requirements.txt
-RUN pip install --no-deps -r requirements.txt
+RUN pip install -r requirements.txt
 
 COPY ./src/main/docker/python/model_preloader.py ./model_preloader.py
 RUN python -u ./model_preloader.py

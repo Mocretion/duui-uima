@@ -1,5 +1,7 @@
 -- Bind static classes from java
 StandardCharsets = luajava.bindClass("java.nio.charset.StandardCharsets")
+Class = luajava.bindClass("java.lang.Class")
+JCasUtil = luajava.bindClass("org.apache.uima.fit.util.JCasUtil")
 
 -- This "serialize" function is called to transform the CAS object into an stream that is sent to the annotator
 -- Inputs:
@@ -7,7 +9,15 @@ StandardCharsets = luajava.bindClass("java.nio.charset.StandardCharsets")
 --  - outputStream: Stream that is sent to the annotator, can be e.g. a string, JSON payload, ...
 function serialize(inputCas, outputStream, params)
     -- Get data from CAS
-    local audioBase64 = inputCas:getSofaDataString() --inputCas:getView(audioView):getSofaDataString()
+    local clazz = Class:forName("org.texttechnologylab.annotation.parliamentary.Video");
+
+    local video_it = JCasUtil:select(inputCas, clazz):iterator()
+    local ids = {}
+
+    while video_it:hasNext() do
+        local video = video_it:next()
+        ids[#ids+1] = video:getId()
+    end
 
     local model = params["model"]
     local batch_size = params["batch_size"]
@@ -24,7 +34,7 @@ function serialize(inputCas, outputStream, params)
 
     -- Encode data as JSON object and write to stream
     outputStream:write(json.encode({
-        audio = audioBase64,
+        ids = ids,
         language = language,
         model = model,
         batch_size = batch_size,
