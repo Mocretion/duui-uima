@@ -280,10 +280,8 @@ def post_process(request: DUUIRequest) -> DUUIResponse:
             response = requests.get(download_url, stream=True)
             response.raise_for_status()  # check for errors
 
-            with open(audio_file, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
+            for chunk in response.iter_content(chunk_size=8192):
+                audio_file.write(chunk)
 
             model = load_model(request.model, language, not request.allow_download)
             audio = whisperx.load_audio(audio_file.name)

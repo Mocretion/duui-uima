@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 from starlette.responses import JSONResponse
 from functools import lru_cache
-from transformers import AutoModel
+from sentence_transformers import SentenceTransformer
 
 class Text(BaseModel):
     text: str
@@ -135,7 +135,7 @@ def getModel():
     global model
     
     if model is None:
-        model = AutoModel.from_pretrained("jinaai/jina-embeddings-v4", trust_remote_code=True)
+        model = SentenceTransformer("jinaai/jina-embeddings-v4", model_kwargs={'default_task': 'retrieval'}, trust_remote_code=True)
         
     return model
 
@@ -145,13 +145,13 @@ def post_process(request: DUUIRequest) -> DUUIResponse:
         
     embeddings = []
     
-    for i in range(len(request.sentences)):
+    for i in range(len(request.texts)):
         
         text = request.texts[i].text
         begin = request.texts[i].begin
         end = request.texts[i].end
             
-        generated_embeddings = getModel().encode(text, task="text-matching", truncate_dim=512)
+        generated_embeddings = getModel().encode(text)
                     
         embeddings.append(Embeddings(
             begin=begin,
