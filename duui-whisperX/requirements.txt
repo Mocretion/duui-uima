@@ -134,3 +134,4 @@ urllib3==2.7.0
 uvicorn==0.23.2
 whisperx==3.7.4
 yarl==1.18.3
+duui-logging @ git+https://github.com/texttechnologylab/DUUIlogger

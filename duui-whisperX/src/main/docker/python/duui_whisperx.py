@@ -10,6 +10,8 @@ from typing import List, Optional
 
 import torch
 import whisperx
+import duui_logging
+from duui_logging import log_info, log_warn, log_error
 from whisperx.diarize import DiarizationPipeline
 from cassis import *
 from fastapi import FastAPI, Response
@@ -173,6 +175,9 @@ app = FastAPI(
     },
 )
 
+duui_logging.add_logging(app)
+
+_duui_log_handler = duui_logging.install(level=logging.WARNING)
 
 # Get input / output of the annotator
 @app.get("/v1/details/input_output")
@@ -291,81 +296,91 @@ def post_process(request: DUUIRequest) -> DUUIResponse:
     if request.language:
         language = request.language
     logger.info("Language: %s", language)
+    log_info(
+        f"Transcribing audio with whisperX model '{request.model}' "
+        f"(language: {language or 'auto-detect'}, "
+        f"diarization: {'requested' if request.hf_token else 'off'})"
+    )
 
-    with NamedTemporaryFile() as audio_file:
-        # if this fails we stop processing
-        with open(audio_file.name, "wb") as fp:
-            fp.write(base64.b64decode(request.audio))
+    try:
+        with NamedTemporaryFile() as audio_file:
+            # if this fails we stop processing
+            with open(audio_file.name, "wb") as fp:
+                fp.write(base64.b64decode(request.audio))
 
-        model = load_model(request.model, language, not request.allow_download)
-        audio = whisperx.load_audio(audio_file.name)
-        # TODO language param
-        result = model.transcribe(audio, batch_size=request.batch_size)
+            model = load_model(request.model, language, not request.allow_download)
+            audio = whisperx.load_audio(audio_file.name)
+            # TODO language param
+            result = model.transcribe(audio, batch_size=request.batch_size)
 
-        # use language detected by the model if not provided
-        if not language:
-            language = result["language"]
-            logger.info("Using detected language: %s", language)
+            # use language detected by the model if not provided
+            if not language:
+                language = result["language"]
+                log_info(f"Auto-detected language: {language}")
 
-        alignment_model, metadata = load_align_model(language)
-        aligned_result = whisperx.align(result["segments"], alignment_model, metadata, audio_file.name, device)
+            alignment_model, metadata = load_align_model(language)
+            aligned_result = whisperx.align(result["segments"], alignment_model, metadata, audio_file.name, device)
 
-        if not request.hf_token:
-            logger.warning("No Hugging Face token provided, not performing diarization")
-        else:
-            diarize_model = load_diarize_model(request.hf_token)
-            # TODO min/max speakers
-            diarize_segments = diarize_model(
-                audio,
-                num_speakers=request.diarization_num_speakers,
-                min_speakers=request.diarization_min_speakers,
-                max_speakers=request.diarization_max_speakers
+            if not request.hf_token:
+                log_warn("No Hugging Face token provided, skipping speaker diarization")
+            else:
+                diarize_model = load_diarize_model(request.hf_token)
+                # TODO min/max speakers
+                diarize_segments = diarize_model(
+                    audio,
+                    num_speakers=request.diarization_num_speakers,
+                    min_speakers=request.diarization_min_speakers,
+                    max_speakers=request.diarization_max_speakers
+                )
+                aligned_result = whisperx.assign_word_speakers(diarize_segments, aligned_result)
+
+            current_length = 0
+            for word in aligned_result["word_segments"]:
+                audio_start = word.get("start")
+                audio_end = word.get("end")
+                text = word.get("word").strip()
+                speaker = word.get("speaker", None)
+
+                if audio_start is None or audio_end is None:  # If segment is not spoken out loud, such as '-'
+                    continue
+
+                if len(text) == 0 and audio_start == audio_end:  # If segment contains no information
+                    continue
+
+                results.append(AudioToken(
+                    timeStart=float(audio_start),
+                    timeEnd=float(audio_end),
+                    text=text,
+                    begin=current_length,
+                    end=current_length + len(text),
+                    speaker=speaker
+                ))
+
+                if len(text) > 0:
+                    current_length += len(text) + 1
+
+            meta = AnnotationMeta(
+                name=settings.annotator_name,
+                version=settings.annotator_version,
+                modelName=f"whisperX {request.model}",
+                modelVersion=whisperx_version
             )
-            aligned_result = whisperx.assign_word_speakers(diarize_segments, aligned_result)
 
-        current_length = 0
-        for word in aligned_result["word_segments"]:
-            audio_start = word.get("start")
-            audio_end = word.get("end")
-            text = word.get("word").strip()
-            speaker = word.get("speaker", None)
-
-            if audio_start is None or audio_end is None:  # If segment is not spoken out loud, such as '-'
-                continue
-
-            if len(text) == 0 and audio_start == audio_end:  # If segment contains no information
-                continue
-
-            results.append(AudioToken(
-                timeStart=float(audio_start),
-                timeEnd=float(audio_end),
-                text=text,
-                begin=current_length,
-                end=current_length + len(text),
-                speaker=speaker
-            ))
-
-            if len(text) > 0:
-                current_length += len(text) + 1
-
-        meta = AnnotationMeta(
-            name=settings.annotator_name,
-            version=settings.annotator_version,
-            modelName=f"whisperX {request.model}",
-            modelVersion=whisperx_version
-        )
-
-        modification_meta = DocumentModification(
-            user=settings.annotator_name,
-            timestamp=modification_timestamp_seconds,
-            comment=f"{settings.annotator_name} ({settings.annotator_version}), whisperX ({whisperx_version})"
-        )
+            modification_meta = DocumentModification(
+                user=settings.annotator_name,
+                timestamp=modification_timestamp_seconds,
+                comment=f"{settings.annotator_name} ({settings.annotator_version}), whisperX ({whisperx_version})"
+            )
+    except Exception:
+        # Surface the failure (with traceback) to the DUUI side, then let DUUI handle it.
+        log_error(f"whisperX processing failed for model '{request.model}'")
+        raise
 
     logger.debug(meta)
     logger.debug(modification_meta)
 
     duration = int(time()) - modification_timestamp_seconds
-    logger.info("Processed in %d seconds", duration)
+    log_info(f"Transcribed {len(results)} audio tokens in {duration} seconds")
     
     return DUUIResponse(
         audio_token=results,
