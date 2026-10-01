@@ -1,5 +1,6 @@
 StandardCharsets = luajava.bindClass("java.nio.charset.StandardCharsets")
 Class = luajava.bindClass("java.lang.Class")
+Double = luajava.bindClass("java.lang.Double")
 JCasUtil = luajava.bindClass("org.apache.uima.fit.util.JCasUtil")
 DUUIUtils = luajava.bindClass("org.texttechnologylab.DockerUnifiedUIMAInterface.lua.DUUILuaUtils")
 Token = luajava.bindClass("org.texttechnologylab.uima.type.spacy.SpacyToken")
@@ -28,19 +29,85 @@ function serialize(inputCas, outputStream, parameters)
                 text = sentence:getCoveredText(),
                 tokens = {}
             }
-            local tokens_it = luajava.newInstance("java.util.ArrayList", JCasUtil:selectCovered(Token, sentence)):listIterator()
-            while tokens_it:hasNext() do
-                local token = tokens_it:next()
+            local sentence_tokens = luajava.newInstance(
+				"java.util.ArrayList",
+				JCasUtil:selectCovered(Token, sentence)
+			)
 
-                dep_type = ""
-                local deps_it = luajava.newInstance("java.util.ArrayList", JCasUtil:selectCovered(Dependency, sentence)):listIterator()
-                while deps_it:hasNext() do
-                    local dep = deps_it:next()
-                    if dep:getDependent() == token then
-                        dep_type = dep:getDependencyType()
-                        break
-                    end
-                end
+			local tokens_it = sentence_tokens:listIterator()
+            while tokens_it:hasNext() do
+				-- FV3 fix: Store the zero-based sentence-local token index so the
+				-- dependency governor can be transferred to Python as head_index.
+				local token_index = tokens_it:nextIndex()
+				local token = tokens_it:next()
+
+				local dep_type = ""
+				local head_index = nil
+
+				local deps_it = luajava.newInstance(
+					"java.util.ArrayList",
+					JCasUtil:selectCovered(Dependency, sentence)
+				):listIterator()
+
+				while deps_it:hasNext() do
+					local dep = deps_it:next()
+
+					if dep:getDependent() == token then
+						dep_type = dep:getDependencyType()
+
+						local governor = dep:getGovernor()
+
+						if governor ~= nil then
+							-- Prefer the actual feature-structure identity. A span alone is
+							-- ambiguous when retokenization creates multiple tokens with the
+							-- same begin/end offsets.
+							for i = 0, sentence_tokens:size() - 1 do
+								local candidate = sentence_tokens:get(i)
+
+								if candidate == governor then
+									head_index = i
+									break
+								end
+							end
+
+							-- Compatibility fallback for CAS implementations whose Lua
+							-- wrappers do not preserve proxy identity. Accept a span match
+							-- only when it identifies exactly one sentence token.
+							if head_index == nil then
+								local matching_index = nil
+								local matching_count = 0
+
+								for i = 0, sentence_tokens:size() - 1 do
+									local candidate = sentence_tokens:get(i)
+
+									if candidate:getBegin() == governor:getBegin()
+										and candidate:getEnd() == governor:getEnd()
+									then
+										matching_index = i
+										matching_count = matching_count + 1
+									end
+								end
+
+								if matching_count == 1 then
+									head_index = matching_index
+								end
+							end
+						end
+
+						-- Fallback for ROOT annotations if no governor could be resolved.
+						if head_index == nil
+							and (
+								dep_type == "--"
+								or dep_type == "ROOT"
+								or dep_type == "root"
+							)
+						then
+							head_index = token_index
+						end
+
+						break
+					end
+				end
 
                 local vector = nil
                 local has_vector = token:getHasVector()
@@ -63,6 +130,7 @@ function serialize(inputCas, outputStream, parameters)
                     is_alpha = token:getIsAlpha(),
                     is_punct = token:getIsPunct(),
                     dep_type = dep_type,
+					head_index = head_index,
                     morph_person = token:getMorph():getPerson(),
                     morph_number = token:getMorph():getNumber(),
                     morph_tense = token:getMorph():getTense(),
@@ -121,7 +189,14 @@ function deserialize(inputCas, inputStream)
             index_anno:setLabelV3(index["label_v3"])
             index_anno:setLabelV2(index["label_v2"])
             index_anno:setDescription(index["description"])
-            index_anno:setValue(index["value"])
+            -- UIMA's primitive double feature cannot represent JSON null.
+            -- Preserve "not computable" as NaN so it cannot silently become
+            -- the valid, calculated result 0.0 in the CAS.
+            if index["value"] == nil then
+                index_anno:setValue(Double.NaN)
+            else
+                index_anno:setValue(index["value"])
+            end
             index_anno:setError(index["error"])
             index_anno:setVersion(index["version"])
             index_anno:addToIndexes()
